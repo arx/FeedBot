@@ -239,14 +239,14 @@ class Feed:
 		
 		title = item.title if 'title' in item else '';
 		if self.title_format:
-			title = self.title_pattern.sub(self.title_format, title)
+			title = self.title_pattern.sub(self.title_format, title, 1)
 		
 		max_length = MAX_LINE_LENGTH
 		link = ''
 		if 'link' in item:
 			link = item.link
 			if self.link_format:
-				link = self.link_pattern.sub(self.link_format, link)
+				link = self.link_pattern.sub(self.link_format, link, 1)
 			if link and title:
 				link = ' - ' + link
 			max_length -= len(link)
