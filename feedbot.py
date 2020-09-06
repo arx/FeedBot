@@ -379,7 +379,7 @@ class Feed:
 		except FileNotFoundError as e:
 			self.disable(str(e))
 			return True
-		except urllib.HTTPError as e:
+		except urllib.request.HTTPError as e:
 			self.disable(str(e))
 			return True
 		except IOError as e:
