@@ -100,6 +100,7 @@ class Feed:
 	
 	def __init__(self, output):
 		self.output = output
+		self.min_items = 1
 		self.max_items = 5
 		self.name = '(default)'
 		self.url = None
@@ -168,6 +169,9 @@ class Feed:
 		
 		if 'state' in section:
 			self.state = section['state']
+		
+		if 'min_items' in section:
+			self.min_items = int(section['min_items'])
 		
 		if 'max_items' in section:
 			self.max_items = int(section['max_items'])
@@ -415,7 +419,7 @@ class Feed:
 			self.backoff = 0
 			return True
 		
-		if len(fp.entries) == 0:
+		if len(fp.entries) < self.min_items:
 			self.disable(u'no items matched')
 			return True
 		
