@@ -1,33 +1,18 @@
-# -*- coding: utf-8 -*-
-"""
-staticrss.py - Willie RSS Module with static configuration
-Copyright © 2014, Daniel Scharrer, <daniel@constexpr.org>
-Copyright 2012, Michael Yanovich, yanovich.net (original RSS module)
-Licensed under the Eiffel Forum License 2.
-
-This is a modification of the standard Willie RSS module with the folloing changes:
-- Is configured via config file, exposes no commands
-- Does not require database for feed state (ignores all messages before startup)
-- Supports multiple messages between polls
-- Allows customizing feed titles and URLs
-- Backoff instead of completely disabling broken feeds
-"""
+#!/usr/bin/env python3
 
 from datetime import datetime
-import time
-import re
-import os
-import socket
-import threading
-import feedparser
-import urllib2
-import urlparse
-import traceback
 import codecs
+import configparser
+import feedparser
 import logging
+import os
+import re
+import socket
+import stat
+import threading
+import time
+import urllib
 from copy import copy
-from willie.module import interval
-from willie.config import ConfigurationError
 from bs4 import BeautifulSoup
 from collections import namedtuple
 
@@ -37,22 +22,88 @@ socket.setdefaulttimeout(10)
 INTERVAL = 30 # seconds between checking for new updates
 MAX_LINE_LENGTH = 390
 
-logger = logging.getLogger('staticrss')
+logger = logging.getLogger('feedbot')
 logger.setLevel(logging.INFO)
 
-class DefaultErrorHandler(urllib2.HTTPDefaultErrorHandler):
+class DefaultErrorHandler(urllib.request.HTTPDefaultErrorHandler):
 	def http_error_default(self, req, fp, code, msg, headers):
-		result = urllib2.HTTPError(req.get_full_url(), code, msg, headers, fp)
+		result = urllib.request.HTTPError(req.get_full_url(), code, msg, headers, fp)
 		result.status = code
 		return result
+
+
+class Output:
+	
+	
+	def __init__(self):
+		self.socket_name = None
+		self.file_name = None
+		self.socket_handle = None
+		self.file_handle = None
+	
+	
+	def parse_config(self, section):
+		
+		if 'socket' in section:
+			self.socket_name = section['socket']
+		
+		if 'file' in section:
+			self.file_name = section['file']
+	
+	def send(self, message):
+		
+		# Open the IRC named pipe if it isn't open yet
+		if self.socket_handle is None and self.socket_name is not None:
+			try:
+				self.socket_handle = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+				self.socket_handle.settimeout(1)
+				self.socket_handle.connect(self.socket_name)
+			except Exception as e:
+				logger.error(u'Could not open socket "{0}": "{1}"'.format(self.socket_name, str(e)))
+				self.socket_handle = False
+		
+		if self.socket_handle is not None and self.socket_handle is not False:
+			try:
+				self.socket_handle.send(message)
+				return
+			except Exception as e:
+				logger.error(str(e))
+				self.socket_handle = False
+		
+		if self.file_handle is None:
+			self.file_handle = open(self.file_name, 'ab')
+			try:
+				os.chmod(self.file_name, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IWGRP | stat.S_IROTH | stat.S_IWOTH)
+			except Exception as e:
+				logger.error(str(e))
+		
+		self.file_handle.write(message)
+		self.file_handle.flush()
+	
+	def msg(self, recipient, message, ending = None):
+		
+		line = recipient + ' ' + message.replace('\n', ' ').replace('\r', '') + '\n'
+		
+		self.send(line.encode('utf-8'));
+	
+	def close(self):
+		if self.socket_handle is not None and self.socket_handle is not False:
+			self.socket_handle.close()
+		self.socket_handle = None
+		if self.file_handle is not None:
+			self.file_handle.close()
+			self.file_handle = None
+
 
 class Feed:
 	
 	
-	def __init__(self):
+	def __init__(self, output):
+		self.output = output
 		self.max_items = 5
 		self.name = '(default)'
 		self.url = None
+		self.agent = 'FeedBot/1.0'
 		self.interval = 0
 		self.age = 0
 		self.soup = None
@@ -63,8 +114,8 @@ class Feed:
 		self.link_pattern = re.compile(r'(.*)')
 		self.link_format = None
 		self.published_soup = None
-		self.exclude = set()
-		self.enable = set()
+		self.channels = set()
+		self.debug_channels = set()
 		self.old_items = None
 		self.old_time = 0
 		self.backoff = 0
@@ -75,50 +126,51 @@ class Feed:
 	
 	def parse_config(self, section):
 		
-		if section.url:
-			self.url = section.url
+		if 'url' in section:
+			self.url = section['url']
 		
-		if section.interval:
-			self.interval = int(section.interval) * 60
+		if 'agent' in section:
+			self.agent = section['agent']
+		
+		if 'interval' in section:
+			self.interval = int(section['interval']) * 60
 			self.age = self.interval + 1
 		
-		if section.soup:
-			self.soup = section.soup
+		if 'soup' in section:
+			self.soup = section['soup']
 		
-		if section.title_soup:
-			self.title_soup = section.title_soup
+		if 'title_soup' in section:
+			self.title_soup = section['title_soup']
 		
-		if section.title_pattern:
-			self.title_pattern = re.compile(section.title_pattern)
+		if 'title_pattern' in section:
+			self.title_pattern = re.compile(section['title_pattern'])
 		
-		if section.title_format:
-			self.title_format = section.title_format
+		if 'title_format' in section:
+			self.title_format = section['title_format']
 		
-		if section.link_soup:
-			self.link_soup = section.link_soup
+		if 'link_soup' in section:
+			self.link_soup = section['link_soup']
 		
-		if section.link_pattern:
-			self.link_pattern = re.compile(section.link_pattern)
+		if 'link_pattern' in section:
+			self.link_pattern = re.compile(section['link_pattern'])
 		
-		if section.link_format:
-			self.link_format = section.link_format
+		if 'link_format' in section:
+			self.link_format = section['link_format']
 		
-		if section.published_soup:
-			self.published_soup = section.published_soup
+		if 'published_soup' in section:
+			self.published_soup = section['published_soup']
 		
-		exclude = section.get_list('exclude')
-		if exclude:
-			self.exclude = set(exclude)
+		if 'channels' in section:
+			self.channels = set(map(str.strip, section['channels'].split(',')))
 		
-		enable = section.get_list('enable')
-		if enable:
-			self.enable = set(enable)
+		if 'debug_channels' in section:
+			self.debug_channels = set(map(str.strip, section['debug_channels'].split(',')))
 		
-		if section.state:
-			self.state = section.state
+		if 'state' in section:
+			self.state = section['state']
 		
-		if section.max_items:
-			self.max_items = int(section.max_items)
+		if 'max_items' in section:
+			self.max_items = int(section['max_items'])
 	
 	
 	def state_file(self):
@@ -128,14 +180,14 @@ class Feed:
 	def load(self):
 		
 		if not self.url:
-			raise ConfigurationError(u'Missing rss url for feed {0}'.format(self.name))
+			raise RuntimeError(u'Missing rss url for feed {0}'.format(self.name))
 		
 		if self.interval < 0:
-			raise ConfigurationError(
+			raise RuntimeError(
 				u'Invalid rss update interval {0} for feed {1}'.format(self.interval, self.name))
 		
 		if self.soup and (not self.title_soup) and (not self.link_soup):
-			raise ConfigurationError(
+			raise RuntimeError(
 				u'soup requires title_soup and/or link_soup for feed {1}'.format(self.name))
 		
 		if os.path.exists(self.state_file()):
@@ -150,7 +202,7 @@ class Feed:
 							first = False
 							self.old_time = float(line)
 						else:
-							old_items.add(unicode(line))
+							old_items.add(str(line))
 				if not first:
 					self.old_items = old_items
 				
@@ -162,36 +214,28 @@ class Feed:
 		if self.old_items is not None:
 			handle = codecs.open(self.state_file(), 'w', encoding='utf-8')
 			try:
-				handle.write(unicode(self.old_time) + u'\n')
+				handle.write(str(self.old_time) + u'\n')
 				for guid in self.old_items:
 					handle.write(guid + u'\n')
 			finally:
 				handle.close()
 	
 	
-	def disable(self, bot, message):
+	def disable(self, message):
 		message = u'{0}: Can\'t parse feed, disabling: {1}'.format(self.name, message)
 		logger.warning(message)
 		if self.backoff != 0:
-			bot.msg(bot.config.core.owner, message)
+			for channel in self.debug_channels:
+				self.output.msg(channel, message)
 		self.backoff += self.interval + (self.backoff / 10)
 	
 	
-	def msg(self, bot, message):
-		
-		channels = self.enable if self.enable is not None else bot.privileges
-		for channel in channels:
-			
-			if not channel or channel[0] != '#':
-				return # Invalid channel
-			
-			if channel in self.exclude:
-				return # Excluded channel
-			
-			bot.msg(channel, message)
+	def msg(self, message):
+		for channel in self.channels:
+			self.output.msg(channel, message)
 	
 	
-	def new_item(self, bot, item):
+	def new_item(self, item):
 		
 		title = item.title if 'title' in item else '';
 		if self.title_format:
@@ -212,13 +256,13 @@ class Feed:
 		
 		message = title + link
 		if message:
-			self.msg(bot, message)
+			self.msg(message)
 	
 	
 	@staticmethod
 	def guid(item):
 		if 'guid' in item:
-			return unicode(item.guid.strip().replace('\n',' '))
+			return str(item.guid.strip().replace('\n',' '))
 		guid = ''
 		if 'title' in item:
 			guid = item.title;
@@ -226,12 +270,9 @@ class Feed:
 			guid = item.link;
 		if 'published' in item:
 			guid += '#' + item.published
-		return unicode(guid.strip().replace('\n',' '))
+		return str(guid.strip().replace('\n',' '))
 	
-	def agent(self, bot):
-		return u'{0}/1.0 ({1})'.format(bot.config.core.nick, bot.config.core.name)
-	
-	def update_feed(self, bot):
+	def update_feed(self):
 		
 		mtime = None
 		if self.url.find(':') == -1:
@@ -240,7 +281,7 @@ class Feed:
 				Status = namedtuple('Status', 'status')
 				return Status(304)
 		
-		fp = feedparser.parse(self.url, etag=self.etag, modified=self.modified, agent=self.agent(bot))
+		fp = feedparser.parse(self.url, etag=self.etag, modified=self.modified, agent=self.agent)
 		
 		# Check for malformed XML
 		if fp.bozo and not isinstance(fp.bozo_exception, feedparser.CharacterEncodingOverride):
@@ -248,7 +289,7 @@ class Feed:
 		
 		# Check HTTP status
 		if getattr(fp, 'status', 200) == 410: # GONE
-			raise urllib2.HTTPError(self.url, 410, 'Gone.', { }, fp)
+			raise urllib.request.HTTPError(self.url, 410, 'Gone.', { }, fp)
 		
 		if mtime:
 			setattr(fp, 'modified', mtime)
@@ -262,11 +303,11 @@ class Feed:
 		except:
 			return blob.strip()
 	
-	def update_soup(self, bot):
+	def update_soup(self):
 		
-		request = urllib2.Request(self.url)
+		request = urllib.request.Request(self.url)
 		
-		request.add_header('User-Agent', self.agent(bot))
+		request.add_header('User-Agent', self.agent)
 		
 		if self.etag and not self.modified:
 			request.add_header('If-None-Match', self.etag)
@@ -274,7 +315,7 @@ class Feed:
 		if self.modified:
 			request.add_header('If-Modified-Since', self.modified)
 		
-		opener = urllib2.build_opener(DefaultErrorHandler()) 
+		opener = urllib.request.build_opener(DefaultErrorHandler())
 		
 		fp = opener.open(request)
 		
@@ -286,20 +327,23 @@ class Feed:
 			if fp.status != 200:
 				raise fp
 		
-		page = BeautifulSoup(fp.read())
+		page = BeautifulSoup(fp.read(), features='lxml')
 		
 		entries = [ ]
 		
 		for post in eval(self.soup, {}, {"page" : page}):
 			
-			entry = feedparser.FeedParserDict()
+			try:
+				entry = feedparser.util.FeedParserDict()
+			except:
+				entry = feedparser.FeedParserDict()
 			
 			if self.title_soup:
 				entry['title'] = self.get_text(eval(self.title_soup, {}, {"post" : post}))
 			
 			if self.link_soup:
 				url = self.get_text(eval(self.link_soup, {}, {"post" : post}))
-				entry['link'] = urlparse.urljoin(self.url, url)
+				entry['link'] = urllib.parse.urljoin(self.url, url)
 			
 			if self.published_soup:
 				entry['published'] = self.get_text(eval(self.published_soup, {}, {"post" : post}))
@@ -318,7 +362,7 @@ class Feed:
 		
 		return fp
 	
-	def update(self, bot, elapsed_seconds):
+	def update(self, elapsed_seconds):
 		
 		# Support per-feed update interval
 		self.age += elapsed_seconds
@@ -329,17 +373,20 @@ class Feed:
 		# Download feed snapshot
 		try:
 			if self.soup:
-				fp = self.update_soup(bot)
+				fp = self.update_soup()
 			else:
-				fp = self.update_feed(bot)
-		except urllib2.HTTPError as e:
-			self.disable(bot, str(e))
+				fp = self.update_feed()
+		except FileNotFoundError as e:
+			self.disable(str(e))
+			return True
+		except urllib.HTTPError as e:
+			self.disable(str(e))
 			return True
 		except IOError as e:
-			self.disable(bot, str(e))
+			self.disable(str(e))
 			return True
 		except Exception as e:
-			self.disable(bot, traceback.format_exc(e))
+			self.disable(str(e))
 			return True
 		
 		# fp.status will only exist if pulling from an online feed
@@ -387,16 +434,17 @@ class Feed:
 						continue
 				if skipped < 0:
 					logger.info(u'{0}: New item: "{1}"'.format(self.name, guid))
-					self.new_item(bot, item)
+					self.new_item(item)
 				skipped += 1
 			if skipped == 1:
-				self.msg(bot, u'(and one more item)')
+				self.msg(u'(and one more item)')
 			elif skipped > 0:
-				self.msg(bot, u'(and {0} more items)'.format(skipped))
+				self.msg(u'(and {0} more items)'.format(skipped))
 		
 		# Update the known items list
 		if new_items:
-			self.old_items = set()
+			if self.old_items is None:
+				self.old_items = set()
 			for item in reversed(fp.entries):
 				self.old_items.add(self.guid(item))
 			if fp.entries and 'published_parsed' in fp.entries[0]:
@@ -409,73 +457,53 @@ class Feed:
 		
 		return True
 
+# create file handler which logs even debug messages
 
-class Feeds:
-	
-	def __init__(self, feeds):
-		self.feeds = feeds
-		self.next = 0
-		self.lock = threading.Lock()
+# create console handler with a higher log level
+logger.addHandler(logging.StreamHandler())
 
+config = configparser.ConfigParser()
+config.sections()
+config.read('feedbot.ini')
+config.read('feedbot.private.ini')
 
-def setup(bot):
-	
-	if not bot.config.has_section('rss'):
-		raise ConfigurationError(u'Missing rss config section')
-	
-	defaults = Feed()
-	defaults.parse_config(bot.config.rss)
-	
-	feeds = [ ]
-	
-	names = bot.config.rss.get_list('feeds')
-	if not names:
-		feeds.append(defaults)
-	else:
-		for name in names:
-			
-			section = 'rss_' + name
-			if not bot.config.has_section(section):
-				raise ConfigurationError(u'Missing rss config section for feed {0}'.format(name))
-			
-			feed = copy(defaults)
-			feed.name = name
-			feed.parse_config(getattr(bot.config, section))
-			
-			feeds.append(feed)
-	
-	for feed in feeds:
-		feed.load()
-		logger.info(u'{0}: {1} {2} @{3} #={4} >={5}'.format(
-			u'Soup' if feed.soup else u'Feed',
-			feed.name, feed.url, feed.interval,
-			len(feed.old_items) if feed.old_items is not None else None, feed.old_time))
-	
-	bot.memory['staticrss'] = Feeds(feeds)
+if 'log' in config['DEFAULT']:
+	logger.addHandler(logging.FileHandler(config['DEFAULT']['log']))
 
+output = Output()
+output.parse_config(config['DEFAULT'])
 
-@interval(INTERVAL)
-def update_feeds(bot):
-	
-	data = bot.memory['staticrss']
-	
-	with data.lock:
-		
-		for i in [(i + data.next) % len(data.feeds) for i in range(len(data.feeds))]:
-			data.next = i + 1
-			if data.feeds[i].update(bot, INTERVAL):
-				return
+defaults = Feed(output)
+defaults.parse_config(config['DEFAULT'])
 
+feeds = [ ]
+for name in config.sections():
+	
+	feed = copy(defaults)
+	feed.name = name
+	feed.parse_config(config[name])
+	
+	feeds.append(feed)
 
-def shutdown(bot):
+for feed in feeds:
+	feed.load()
+	logger.info(u'{0}: {1} {2} @{3} #={4} >={5}'.format(
+		u'Soup' if feed.soup else u'Feed',
+		feed.name, feed.url, feed.interval,
+		len(feed.old_items) if feed.old_items is not None else None, feed.old_time))
+
+next = 0
+while True:
 	
-	data = bot.memory['staticrss']
+	try:
+		for i in [(i + next) % len(feeds) for i in range(len(feeds))]:
+			next = i + 1
+			if feeds[i].update(INTERVAL):
+				break
+			output.close()
+	except Exception as e:
+		logger.error(str(e))
+	finally:
+		output.close()
 	
-	with data.lock:
-		
-		for feed in data.feeds:
-			try:
-				feed.save()
-			except Exception as e:
-				logger.warning('{0}: Can\'t save feed state: {1}'.format(
-					feed.name, traceback.format_exc(e)))
+	time.sleep(INTERVAL)
