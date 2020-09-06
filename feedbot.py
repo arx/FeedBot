@@ -392,8 +392,6 @@ class Feed:
 		# fp.status will only exist if pulling from an online feed
 		status = getattr(fp, 'status', 200)
 		
-		self.backoff = 0
-		
 		# Check HTTP status
 		if status == 301 and hasattr(fp, 'href'): # MOVED_PERMANENTLY
 			logger.warning(u'{0}: status = 301 (Moved Permanently), updating URI to {1}'.format(
@@ -401,18 +399,27 @@ class Feed:
 			self.url = fp.href
 		if status == 304: # NOT MODIFIED
 			logger.info(u'{0}: status = 304 (Not Modified)'.format(self.name))
+			self.backoff = 0
 			return True
 		
 		# Check if anything changed
 		new_etag = fp.etag if hasattr(fp, 'etag') else None
 		if new_etag is not None and new_etag == self.etag:
 			logger.info(u'{0}: Same etag: {1}'.format(self.name, new_etag))
+			self.backoff = 0
 			return True
 		new_modified = fp.modified if hasattr(fp, 'modified') else None
 		if new_modified is not None and new_modified == self.modified:
 			logger.info(u'{0}: Same modification time: {1}'.format(
 				self.name, new_modified))
+			self.backoff = 0
 			return True
+		
+		if len(fp.entries) == 0:
+			self.disable(u'no items matched')
+			return True
+		
+		self.backoff = 0
 		
 		logger.info(u'{0}: status = {1}, items = {2}, etag = {3}, time = {4}'.format(
 			self.name, status, len(fp.entries), new_etag, new_modified))
